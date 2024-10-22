@@ -2,6 +2,7 @@ import cv2
 import argparse
 import imutils
 import numpy as np
+import subprocess as sb
 
 def read_image(img):
     return cv2.imread(img)
@@ -147,10 +148,11 @@ def threshold_table(grey):
 
 def dilate_table(thresholded_image):
     kernel_to_remove_gaps_between_words = np.array([
-            [1,1,1,1,1,1,1,1,1,1],
-            [1,1,1,1,1,1,1,1,1,1]
-            # [1,1,1,1,1,1,1,1,1],
-            # [1,1,1,1,1,1,1,1,1]
+            #[1,1,1,1,1,1,1,1,1,1],
+            #[1,1,1,1,1,1,1,1,1,1]
+            #[1,1,1,1,1,1,1,1,1],
+            #[1,1,1,1,1,1,1,1,1]
+            [1,1]
      ])
     #kernel_to_remove_gaps_between_words = np.ones([10, 2])
     dilated_image = cv2.dilate(thresholded_image, kernel_to_remove_gaps_between_words, iterations=5)
@@ -164,6 +166,75 @@ def find_table_contours(original_image, dilated_image):
     image_with_contours_drawn = original_image.copy()
     cv2.drawContours(image_with_contours_drawn, contours, -1, (0, 255, 0), 3)
     return image_with_contours_drawn, contours
+
+def convert_contours_to_bounding_boxes(original_image, contours):
+    bounding_boxes = []
+    image_with_all_bounding_boxes = original_image.copy()
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        bounding_boxes.append((x, y, w, h))
+        image_with_all_bounding_boxes = cv2.rectangle(image_with_all_bounding_boxes, (x, y), (x + w, y + h), (0, 255, 0), 5)
+    return bounding_boxes, image_with_all_bounding_boxes
+
+def get_mean_height_of_bounding_boxes(bounding_boxes):
+    heights = []
+    for bounding_box in bounding_boxes:
+        x, y, w, h = bounding_box
+        heights.append(h)
+    return np.mean(heights)
+
+def sort_bounding_boxes_by_y_coordinate(bounding_boxes):
+    bounding_boxes = sorted(bounding_boxes, key=lambda x: x[1])
+    return bounding_boxes
+
+def club_all_bounding_boxes_by_similar_y_coordinates_into_rows(mean_height, bounding_boxes):
+    rows = []
+    half_of_mean_height = mean_height / 2
+    current_row = [ bounding_boxes[0] ]
+    for bounding_box in bounding_boxes[1:]:
+        current_bounding_box_y = bounding_box[1]
+        previous_bounding_box_y = current_row[-1][1]
+        distance_between_bounding_boxes = abs(current_bounding_box_y - previous_bounding_box_y)
+        if distance_between_bounding_boxes <= half_of_mean_height:
+            current_row.append(bounding_box)
+        else:
+            rows.append(current_row)
+            current_row = [ bounding_box ]
+    rows.append(current_row)
+    return rows
+
+def sort_all_rows_by_x_coordinate(rows):
+    for row in rows:
+        row.sort(key=lambda x: x[0])
+    return rows
+
+def get_result_from_tersseract(image_path):
+    output = sb.getoutput('C:\Program Files\Tesseract-OCR\tesserac.exe ' + image_path + ' - -l eng --oem 3 --psm 7 --dpi 72 -c tessedit_char_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789().calmg* "')
+    output = output.strip()
+    return output
+
+def crop_each_bounding_box_and_ocr(original_image, rows, table_num):
+    table = []
+    current_row = []
+    image_number = 0
+    for row in rows:
+        for bounding_box in row:
+            x, y, w, h = bounding_box
+            y = y - 5
+            cropped_image = original_image[y:y+h, x:x+w]
+            image_slice_path = "./ocr_slices/" + str(table_num) + "/img_" + str(image_number) + ".jpg"
+            cv2.imwrite(image_slice_path, cropped_image)
+            results_from_ocr = get_result_from_tersseract(image_slice_path)
+            current_row.append(results_from_ocr)
+            image_number += 1
+        table.append(current_row)
+        current_row = []
+    return table
+
+def generate_csv_file(table, num):
+    with open("output" + str(num) + ".csv", "w") as f:
+        for row in table:
+            f.write(",".join(row) + "\n")
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
@@ -238,9 +309,17 @@ if __name__ == "__main__":
         combined_table_dilated = dilate_combined_image_to_make_lines_thicker(combine_lines_eroded_table)
         table_without_lines = subtract_combined_and_dilated_image_from_original_image(inverted_table, combined_table_dilated)
         table_without_lines_noise_removed = remove_noise_with_erode_and_dilate(table_without_lines)
-        dilated_table = dilate_table(thresholded_table)
+        #dilated_table = dilate_table(thresholded_table)
+        dilated_table = dilate_table(table_without_lines_noise_removed)
         table_with_contours_drawn, table_cnts = find_table_contours(table, dilated_table)
-        table = table_without_lines_noise_removed
+        bounding_boxes, all_bounding_boxes_table =  convert_contours_to_bounding_boxes(table, table_cnts)
+        mean_height_of_bounding_boxes = get_mean_height_of_bounding_boxes(bounding_boxes)
+        bounding_boxes = sort_bounding_boxes_by_y_coordinate(bounding_boxes)
+        rows = club_all_bounding_boxes_by_similar_y_coordinates_into_rows(mean_height_of_bounding_boxes, bounding_boxes)
+        rows = sort_all_rows_by_x_coordinate(rows)
+        res = crop_each_bounding_box_and_ocr(table, rows, count)
+        generate_csv_file(res, count)
+        table = all_bounding_boxes_table
         print_image("Table" + str(count), table)
         count = count + 1
     
